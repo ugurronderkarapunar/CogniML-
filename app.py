@@ -11,7 +11,7 @@ from sklearn.metrics import roc_auc_score, r2_score, mean_absolute_error
 from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
 import openai
-import matplotlib.pyplot as plt
+
 
 # Sayfa ayarları
 st.set_page_config(page_title="CogniML", layout="wide")
