@@ -7,17 +7,14 @@ from plotly.subplots import make_subplots
 import plotly.io as pio
 from io import BytesIO
 from scipy import stats
-from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
-from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import base64
-from datetime import datetime
 
 # ------------------------------
 # SAYFA YAPILANDIRMASI VE TEMA
 # ------------------------------
 st.set_page_config(page_title="CogniML Analyst Pro", layout="wide", initial_sidebar_state="expanded")
 
-# Profesyonel koyu tema ve özel CSS
 st.markdown("""
 <style>
     .main { background-color: #0d1117; color: #e6edf3; }
@@ -29,7 +26,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Plotly global tema
+# Plotly tema şablonu
 pio.templates["cogniml"] = go.layout.Template(
     layout=dict(
         paper_bgcolor="#0d1117",
@@ -192,32 +189,61 @@ with tabs[1]:
         facet_col = st.selectbox("Grupla (facet)", ["Yok"] + all_cols, key="facetcol")
     with col_right:
         plot_df = df.copy()
-        if chart_type == "Isı Haritası" and color_col != "Yok":
-            pivot = plot_df.pivot_table(index=x_col, columns=color_col, values=y_col, aggfunc='mean')
-            fig = px.imshow(pivot, aspect="auto", color_continuous_scale='viridis')
-        elif chart_type == "Zaman Serisi":
-            if pd.api.types.is_datetime64_any_dtype(df[x_col]) or 'date' in x_col.lower():
-                fig = px.line(plot_df.sort_values(x_col), x=x_col, y=y_col, color=None if color_col=="Yok" else color_col)
-            else:
-                st.warning("Zaman serisi için tarih sütunu seçin.")
-                st.stop()
-        elif chart_type == "3D Dağılım":
-            z_col = st.selectbox("Z Ekseni", num_cols, key="zcol")
-            fig = px.scatter_3d(plot_df, x=x_col, y=y_col, z=z_col, color=None if color_col=="Yok" else color_col)
-        elif chart_type == "Coğrafi Harita":
-            if 'country' in [c.lower() for c in all_cols] or 'city' in [c.lower() for c in all_cols]:
-                geo_col = st.selectbox("Konum sütunu", all_cols, key="geocol")
-                fig = px.choropleth(plot_df, locations=geo_col, locationmode='country names',
+        chart_map = {
+            "Çubuk": "bar",
+            "Çizgi": "line",
+            "Dağılım": "scatter",
+            "Pasta": "pie",
+            "Histogram": "histogram",
+            "Kutu": "box",
+            "Isı Haritası": "heatmap",
+            "Zaman Serisi": "line",
+            "3D Dağılım": "scatter_3d",
+            "Coğrafi Harita": "choropleth"
+        }
+        selected_chart = chart_map[chart_type]
+        color = None if color_col == "Yok" else color_col
+        facet = None if facet_col == "Yok" else facet_col
+
+        try:
+            if chart_type == "Isı Haritası":
+                if color_col == "Yok":
+                    st.error("Isı haritası için lütfen bir Renk sütunu seçin.")
+                    st.stop()
+                pivot = plot_df.pivot_table(index=x_col, columns=color_col, values=y_col, aggfunc='mean')
+                fig = px.imshow(pivot, aspect="auto", color_continuous_scale='viridis')
+            elif chart_type == "Zaman Serisi":
+                if not (pd.api.types.is_datetime64_any_dtype(plot_df[x_col]) or 'date' in x_col.lower()):
+                    st.warning("Zaman serisi için tarih sütunu seçin.")
+                    st.stop()
+                fig = px.line(plot_df.sort_values(x_col), x=x_col, y=y_col, color=color)
+            elif chart_type == "3D Dağılım":
+                z_col = st.selectbox("Z Ekseni", num_cols, key="zcol")
+                fig = px.scatter_3d(plot_df, x=x_col, y=y_col, z=z_col, color=color)
+            elif chart_type == "Coğrafi Harita":
+                loc_col = st.selectbox("Konum sütunu", all_cols, key="geocol")
+                fig = px.choropleth(plot_df, locations=loc_col, locationmode='country names',
                                     color=y_col, color_continuous_scale='viridis')
             else:
-                st.warning("Coğrafi harita için ülke/şehir sütunu gerekli.")
-                st.stop()
-        else:
-            fig = getattr(px, chart_type.lower().split()[0])(plot_df, x=x_col, y=y_col,
-                                                             color=None if color_col=="Yok" else color_col,
-                                                             facet_col=None if facet_col=="Yok" else facet_col)
-        fig.update_layout(template=pio.templates.default, height=550)
-        st.plotly_chart(fig, use_container_width=True)
+                # Standart grafikler
+                if selected_chart == "bar":
+                    fig = px.bar(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                elif selected_chart == "line":
+                    fig = px.line(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                elif selected_chart == "scatter":
+                    size_col = st.selectbox("Büyüklük (opsiyonel)", ["Yok"] + num_cols, key="size_col")
+                    size = None if size_col == "Yok" else size_col
+                    fig = px.scatter(plot_df, x=x_col, y=y_col, color=color, size=size, facet_col=facet)
+                elif selected_chart == "pie":
+                    fig = px.pie(plot_df, names=x_col, values=y_col, color=color)
+                elif selected_chart == "histogram":
+                    fig = px.histogram(plot_df, x=x_col, color=color, facet_col=facet)
+                elif selected_chart == "box":
+                    fig = px.box(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+            fig.update_layout(template=pio.templates.default, height=550)
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Grafik oluşturulamadı: {e}")
 
 # ----- PIVOT & KODLAMA -----
 with tabs[2]:
@@ -333,7 +359,6 @@ with tabs[6]:
         df.to_excel(writer, index=False)
     st.download_button("📥 Excel İndir", output.getvalue(), "temiz_veri.xlsx")
 
-    # Basit HTML rapor
     if st.button("📄 Hızlı Rapor (HTML)"):
         html = f"<html><body><h1>Veri Raporu</h1>{df.head(5).to_html()}</body></html>"
         b64 = base64.b64encode(html.encode()).decode()
