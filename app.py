@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
@@ -17,17 +16,42 @@ st.set_page_config(page_title="CogniML", layout="wide")
 st.markdown("""<style>
     .main { background-color: #0f1117; color: #c9d1e0; }
     .stButton>button { background-color: #4f8ef7; color: white; font-weight: bold; }
+    .step-box { border: 1px solid #4f8ef7; border-radius: 8px; padding: 20px; margin: 10px 0; }
 </style>""", unsafe_allow_html=True)
 
-for key, default in {
-    "df_raw": None, "target": None, "task": None,
-    "selected_models": [], "preproc": {}, "results": [],
-    "best_model": None, "best_name": ""
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+# ========== Session State ==========
+if "step" not in st.session_state:
+    st.session_state.step = 1
+if "df_raw" not in st.session_state:
+    st.session_state.df_raw = None
+if "target" not in st.session_state:
+    st.session_state.target = None
+if "task" not in st.session_state:
+    st.session_state.task = None
+if "high_card_cols" not in st.session_state:
+    st.session_state.high_card_cols = []
+if "dropped_cols" not in st.session_state:
+    st.session_state.dropped_cols = []
+if "cleaned_data" not in st.session_state:
+    st.session_state.cleaned_data = None
+if "preproc" not in st.session_state:
+    st.session_state.preproc = {}
+if "feature_importance" not in st.session_state:
+    st.session_state.feature_importance = None
+if "selected_features" not in st.session_state:
+    st.session_state.selected_features = []
+if "X_final" not in st.session_state:
+    st.session_state.X_final = None
+if "y_final" not in st.session_state:
+    st.session_state.y_final = None
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "best_model" not in st.session_state:
+    st.session_state.best_model = None
+if "best_name" not in st.session_state:
+    st.session_state.best_name = ""
 
-# ========== GELİŞMİŞ VERİ TEMİZLİK FONKSİYONLARI ==========
+# ========== Yardımcı Fonksiyonlar ==========
 def is_numeric_column(series):
     sample = series.dropna().head(10).astype(str).str.strip()
     return sample.str.contains(r'^-?[\d.,%\s€$]+$').all()
@@ -52,121 +76,10 @@ def extract_date_features(df, col):
         pass
     return False
 
-def generate_profile(df, target):
-    num = df.select_dtypes(include=np.number)
-    cat = df.select_dtypes(include='object')
-    n_rows, n_cols = df.shape
-    return {
-        "Satır": n_rows, "Sütun": n_cols,
-        "Sayısal Sütun": len(num.columns),
-        "Kategorik Sütun": len(cat.columns),
-        "Hedef Benzersiz Değer": df[target].nunique(),
-        "Eksik Hücre Oranı": round(df.isnull().sum().sum()/(n_rows*n_cols), 3),
-        "Tekrar Eden Satır": df.duplicated().sum(),
-        "Yüksek Kardinalite": [(c, df[c].nunique()) for c in cat.columns if df[c].nunique()>50]
-    }
-
-@st.cache_data
-def preprocess_data(df, target, task):
-    df = df.copy()
-    df.drop_duplicates(inplace=True)
-    df.dropna(axis=1, how='all', inplace=True)
-
-    features = [c for c in df.columns if c != target]
-    original_obj = df[features].select_dtypes(include="object").columns.tolist()
-
-    # 1. Obje sütunlarını tara, sayısal görünümlü olanları temizle
-    for col in original_obj:
-        if is_numeric_column(df[col]):
-            df[col] = clean_numeric_column(df[col])
-            df[col] = safe_convert_to_numeric(df[col])
-        elif df[col].dropna().nunique() < 50:
-            pass  # kategorik olarak kalacak, frekans kodlama yapılacak
-        else:
-            pass  # yüksek kardinalite, frekans kodlanacak
-
-    # 2. Tarih sütunlarını yakala ve özellik çıkar
-    for col in features[:]:
-        if col in df.columns and df[col].dtype == object:
-            extract_date_features(df, col)
-
-    # 3. Güncel sayısal ve kategorik sütun listeleri
-    current_features = [c for c in features if c in df.columns]
-    num_cols = df[current_features].select_dtypes(include=np.number).columns.tolist()
-    cat_cols = df[current_features].select_dtypes(include="object").columns.tolist()
-
-    # Outlier clipping
-    if num_cols:
-        Q1 = df[num_cols].quantile(0.25)
-        Q3 = df[num_cols].quantile(0.75)
-        IQR = Q3 - Q1
-        df[num_cols] = df[num_cols].clip(lower=Q1-1.5*IQR, upper=Q3+1.5*IQR, axis=1)
-
-    # Çarpıklık düzeltme
-    for col in num_cols:
-        if df[col].min() > 0 and abs(df[col].skew()) > 1:
-            df[col] = np.log1p(df[col])
-
-    # Eksik doldurma
-    if num_cols:
-        df[num_cols] = SimpleImputer(strategy="median").fit_transform(df[num_cols])
-    if cat_cols:
-        df[cat_cols] = SimpleImputer(strategy="constant", fill_value="missing").fit_transform(df[cat_cols])
-
-    # Kategorikleri frekans kodla
-    encoders = {}
-    cat_options = {}
-    for col in cat_cols:
-        freq = df[col].value_counts(normalize=True)
-        df[col] = df[col].map(freq)
-        df[col].fillna(0, inplace=True)
-        encoders[col] = freq.to_dict()
-        cat_options[col] = list(freq.index)
-
-    # 4. Tüm feature'ları sayısala zorla (güvenlik)
-    for col in current_features:
-        df[col] = safe_convert_to_numeric(df[col])
-
-    # Hedef değişken
-    y = df[target].copy()
-    target_encoder = None
-    if task == "classification":
-        le = LabelEncoder()
-        y = pd.Series(le.fit_transform(y), name=target)
-        target_encoder = le
-    else:
-        y = safe_convert_to_numeric(y)
-
-    X = df[current_features]
-    X = X.dropna(axis=1, how='all')
-    current_features = X.columns.tolist()
-
-    # Özellik önemi (geçici scaler ile)
-    temp_scaler = StandardScaler()
-    X_temp = temp_scaler.fit_transform(X)
-    rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1) if task=="classification" else RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
-    rf.fit(X_temp, y)
-    imp = pd.Series(rf.feature_importances_, index=current_features).sort_values(ascending=False)
-    top_features = imp.head(15).index.tolist()
-
-    # === SADECE SEÇİLİ ÖZELLİKLERLE YENİ SCALER VE X ===
-    X_selected = X[top_features]
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_selected)
-
-    num_stats = {}
-    for col in top_features:
-        num_stats[col] = (float(X_selected[col].min()), float(X_selected[col].max()), float(X_selected[col].mean()))
-
-    preproc = {
-        "selected_features": top_features,
-        "encoders": encoders,
-        "cat_options": cat_options,
-        "num_stats": num_stats,
-        "scaler": scaler,          # sadece seçili sütunlarla eğitilmiş scaler
-        "target_encoder": target_encoder
-    }
-    return X_scaled, y, preproc
+def compute_feature_importance(X, y, task):
+    model = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1) if task=="classification" else RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
+    model.fit(X, y)
+    return pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
 
 @st.cache_data
 def train_models(X, y, task, model_codes):
@@ -175,7 +88,6 @@ def train_models(X, y, task, model_codes):
     best_score = -np.inf
     best_model = None
     best_name = ""
-
     model_grids = {
         "classification": {
             "rf": (RandomForestClassifier(random_state=42, class_weight='balanced'),
@@ -206,7 +118,6 @@ def train_models(X, y, task, model_codes):
     }
     grids = model_grids[task]
     scoring = 'roc_auc_ovr_weighted' if task=="classification" else 'r2'
-
     for code in model_codes:
         if code not in grids: continue
         model, param_dist = grids[code]
@@ -258,51 +169,183 @@ def generate_report(results, best_name, task, api_key=None):
         lines.append("\n*(LLM yorumu için API anahtarı girin.)*")
     return "\n".join(lines)
 
-# ========== ARAYÜZ ==========
-st.title("🧠 CogniML – The Cognitive Data Scientist")
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📂 Veri Yükle", "🔍 Profil", "🤖 Eğitim", "📊 Sonuçlar", "🔮 Tahmin"
-])
+# ========== ADIMLAR ==========
+st.title("🧠 CogniML – Karar Yetkili Sürüm")
+st.progress(st.session_state.step / 7)
 
-with tab1:
-    st.header("Veri Yükleme")
-    f = st.file_uploader("CSV veya Excel", type=["csv","xlsx","xls"])
-    if f:
-        try:
-            if f.name.endswith('.csv'):
-                df = pd.read_csv(f)
-            else:
-                df = pd.read_excel(f)
-            df.columns = (df.columns.str.strip().str.lower()
-                         .str.replace(r"[^\w]","_",regex=True)
-                         .str.replace(r"_+","_",regex=True).str.strip("_"))
-            st.session_state.df_raw = df
-            st.success(f"{f.name} yüklendi – {df.shape[0]} satır × {df.shape[1]} sütun")
-            st.dataframe(df.head())
-        except Exception as e:
-            st.error(f"Hata: {e}")
+# ---------- ADIM 1: Veri Yükle ----------
+if st.session_state.step == 1:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("📂 Adım 1: Veri Yükleme")
+        f = st.file_uploader("CSV veya Excel", type=["csv","xlsx","xls"])
+        if f:
+            try:
+                if f.name.endswith('.csv'):
+                    df = pd.read_csv(f)
+                else:
+                    df = pd.read_excel(f)
+                df.columns = (df.columns.str.strip().str.lower()
+                             .str.replace(r"[^\w]","_",regex=True)
+                             .str.replace(r"_+","_",regex=True).str.strip("_"))
+                st.session_state.df_raw = df
+                st.success(f"{f.name} yüklendi – {df.shape[0]} satır × {df.shape[1]} sütun")
+                st.dataframe(df.head())
+                if st.button("Profil ve Hedef Seçimine Geç ➡️"):
+                    st.session_state.step = 2
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Hata: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab2:
-    st.header("Veri Profili")
-    if st.session_state.df_raw is None:
-        st.warning("Lütfen önce veri yükleyin.")
-    else:
+# ---------- ADIM 2: Profil & Hedef ----------
+elif st.session_state.step == 2:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("🔍 Adım 2: Veri Profili ve Hedef Seçimi")
         df = st.session_state.df_raw
-        target = st.selectbox("Hedef değişken", df.columns, key="target_select")
-        if st.button("Profili Çıkar"):
+        target = st.selectbox("Hedef değişken", df.columns)
+        if st.button("Profili Çıkar ve Devam Et"):
             st.session_state.target = target
             nuniq = df[target].nunique()
             task = "classification" if df[target].dtype==object or nuniq<=15 else "regression"
             st.session_state.task = task
-            profile = generate_profile(df, target)
-            st.json(profile)
-            st.success(f"Görev: **{task.upper()}**")
+            # Yüksek kardinalite tespiti
+            cat_cols = df.select_dtypes(include='object').columns.tolist()
+            high_card = [(c, df[c].nunique()) for c in cat_cols if c!=target and df[c].nunique()>50]
+            st.session_state.high_card_cols = high_card
+            st.session_state.step = 3
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab3:
-    st.header("Model Eğitimi")
-    if st.session_state.df_raw is None or st.session_state.target is None:
-        st.warning("Önce veri yükleyip profil adımında hedef seçin.")
-    else:
+# ---------- ADIM 3: Yüksek Kardinalite Temizliği ----------
+elif st.session_state.step == 3:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("🗑️ Adım 3: Yüksek Kardinaliteli Sütunları Temizle")
+        high_card = st.session_state.high_card_cols
+        if not high_card:
+            st.success("Yüksek kardinaliteli sütun bulunamadı.")
+            if st.button("Özellik Seçimine Geç ➡️"):
+                st.session_state.step = 4
+                st.rerun()
+        else:
+            st.warning("Aşağıdaki sütunlar çok fazla benzersiz değere sahip. Silmek istediklerinizi işaretleyin:")
+            drop_list = []
+            for col, nunique in high_card:
+                if st.checkbox(f"{col} ({nunique} benzersiz)", value=False, key=f"drop_{col}"):
+                    drop_list.append(col)
+            if st.button("Seçilenleri Sil ve Devam Et ➡️"):
+                st.session_state.dropped_cols = drop_list
+                st.session_state.step = 4
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------- ADIM 4: Özellik Seçimi ----------
+elif st.session_state.step == 4:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("🧩 Adım 4: Özellik Seçimi")
+        # Veriyi temizle ve özellik önemini hesapla
+        df = st.session_state.df_raw.copy()
+        target = st.session_state.target
+        drop_cols = st.session_state.dropped_cols
+        if drop_cols:
+            df.drop(columns=drop_cols, inplace=True, errors='ignore')
+        df.drop_duplicates(inplace=True)
+        df.dropna(axis=1, how='all', inplace=True)
+
+        features = [c for c in df.columns if c != target]
+        # Otomatik sayısallaştırma (tarih, yüzde, para vb.)
+        for col in features[:]:
+            if col in df.columns and df[col].dtype == object:
+                if is_numeric_column(df[col]):
+                    df[col] = clean_numeric_column(df[col])
+                    df[col] = safe_convert_to_numeric(df[col])
+                elif df[col].dropna().nunique() > 50:
+                    extract_date_features(df, col)  # tarih olabilir
+        # Sayısal sütunları temizle
+        num_cols = df[features].select_dtypes(include=np.number).columns.tolist()
+        if num_cols:
+            Q1 = df[num_cols].quantile(0.25)
+            Q3 = df[num_cols].quantile(0.75)
+            IQR = Q3 - Q1
+            df[num_cols] = df[num_cols].clip(lower=Q1-1.5*IQR, upper=Q3+1.5*IQR, axis=1)
+        # Çarpıklık
+        for col in num_cols:
+            if df[col].min() > 0 and abs(df[col].skew()) > 1:
+                df[col] = np.log1p(df[col])
+        # Eksik doldurma
+        cat_cols = df[features].select_dtypes(include="object").columns.tolist()
+        if num_cols:
+            df[num_cols] = SimpleImputer(strategy="median").fit_transform(df[num_cols])
+        if cat_cols:
+            df[cat_cols] = SimpleImputer(strategy="constant", fill_value="missing").fit_transform(df[cat_cols])
+        # Kategorikleri frekans kodla
+        encoders = {}
+        cat_options = {}
+        for col in cat_cols:
+            freq = df[col].value_counts(normalize=True)
+            df[col] = df[col].map(freq).fillna(0)
+            encoders[col] = freq.to_dict()
+            cat_options[col] = list(freq.index)
+        # Tüm sütunları sayısala zorla
+        for col in features:
+            df[col] = safe_convert_to_numeric(df[col])
+        # Hedef encode
+        y = df[target].copy()
+        target_encoder = None
+        if st.session_state.task == "classification":
+            le = LabelEncoder()
+            y = pd.Series(le.fit_transform(y), name=target)
+            target_encoder = le
+        else:
+            y = safe_convert_to_numeric(y)
+        X = df[[c for c in features if c in df.columns]].dropna(axis=1, how='all')
+        # Ölçekleyip önem hesapla
+        scaler_temp = StandardScaler()
+        X_temp = scaler_temp.fit_transform(X)
+        importance = compute_feature_importance(X_temp, y, st.session_state.task)
+        st.session_state.feature_importance = importance
+        st.session_state.cleaned_data = (X, y, encoders, cat_options, target_encoder)
+        st.session_state.all_features = X.columns.tolist()
+
+        st.write("**Özellik Önem Sıralaması:**")
+        st.dataframe(importance.reset_index().rename(columns={"index":"Özellik", 0:"Önem"}))
+        # Kullanıcıya seçim hakkı
+        default_features = importance.head(15).index.tolist()
+        selected = st.multiselect("Modelde kullanılacak özellikleri seçin (en az 1)", 
+                                  options=X.columns.tolist(),
+                                  default=default_features)
+        if st.button("Seçilen Özelliklerle Devam Et ➡️"):
+            if not selected:
+                st.error("En az bir özellik seçmelisiniz!")
+            else:
+                st.session_state.selected_features = selected
+                # Seçilen özelliklerle son X_scaled oluştur
+                X_sel = X[selected]
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X_sel)
+                st.session_state.X_final = X_scaled
+                st.session_state.y_final = y
+                st.session_state.preproc = {
+                    "selected_features": selected,
+                    "encoders": encoders,
+                    "cat_options": cat_options,
+                    "num_stats": {col: (float(X_sel[col].min()), float(X_sel[col].max()), float(X_sel[col].mean())) for col in selected},
+                    "scaler": scaler,
+                    "target_encoder": target_encoder,
+                    "task": st.session_state.task
+                }
+                st.session_state.step = 5
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------- ADIM 5: Model Eğitimi ----------
+elif st.session_state.step == 5:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("🤖 Adım 5: Model Seçimi ve Eğitim")
         models = {
             "Random Forest": "rf",
             "XGBoost": "xgb",
@@ -311,42 +354,49 @@ with tab3:
             "SVM": "svm",
             "Logistic Regression / Ridge": "linear"
         }
-        selected_names = st.multiselect("Modelleri seçin", list(models.keys()), default=["Random Forest","XGBoost"])
+        selected_names = st.multiselect("Eğitilecek modeller", list(models.keys()), default=["Random Forest","XGBoost"])
         if st.button("🚀 Modelleri Eğit"):
             model_codes = [models[n] for n in selected_names]
-            with st.spinner("Veri işleniyor..."):
-                try:
-                    X, y, preproc = preprocess_data(st.session_state.df_raw, st.session_state.target, st.session_state.task)
-                    st.session_state.preproc = preproc
-                except Exception as e:
-                    st.error(f"Veri işleme hatası: {e}")
-                    st.stop()
-            with st.spinner("Modeller eğitiliyor..."):
-                results, best_name, best_model = train_models(X, y, st.session_state.task, model_codes)
+            with st.spinner("Eğitim sürüyor..."):
+                results, best_name, best_model = train_models(
+                    st.session_state.X_final, st.session_state.y_final,
+                    st.session_state.task, model_codes
+                )
                 st.session_state.results = results
                 st.session_state.best_model = best_model
                 st.session_state.best_name = best_name
             st.success("Eğitim tamamlandı!")
+            st.session_state.step = 6
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab4:
-    st.header("Sonuçlar & Rapor")
-    if not st.session_state.results:
-        st.warning("Henüz eğitim yapılmadı.")
-    else:
-        st.table(st.session_state.results)
-        st.markdown(f"### 🏆 En iyi: **{st.session_state.best_name.upper()}**")
-        api_key = st.text_input("OpenAI API Key (opsiyonel)", type="password")
-        if st.button("Rapor Oluştur"):
-            report = generate_report(st.session_state.results, st.session_state.best_name, st.session_state.task, api_key)
-            st.markdown(report)
+# ---------- ADIM 6: Sonuçlar & Rapor ----------
+elif st.session_state.step == 6:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("📊 Adım 6: Sonuçlar ve Rapor")
+        if not st.session_state.results:
+            st.warning("Henüz sonuç yok.")
+        else:
+            st.table(st.session_state.results)
+            st.markdown(f"### 🏆 En iyi model: **{st.session_state.best_name.upper()}**")
+            api_key = st.text_input("OpenAI API Key (opsiyonel)", type="password")
+            if st.button("📄 Rapor Oluştur"):
+                report = generate_report(st.session_state.results, st.session_state.best_name, st.session_state.task, api_key)
+                st.markdown(report)
+            if st.button("Tahmin Aşamasına Geç ➡️"):
+                st.session_state.step = 7
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab5:
-    st.header("Yeni Kayıt Tahmini")
-    if st.session_state.best_model is None:
-        st.warning("Önce model eğitin.")
-    else:
+# ---------- ADIM 7: Tahmin ----------
+elif st.session_state.step == 7:
+    with st.container():
+        st.markdown('<div class="step-box">', unsafe_allow_html=True)
+        st.header("🔮 Adım 7: Yeni Kayıt Tahmini")
         preproc = st.session_state.preproc
-        features = preproc["selected_features"]  # seçili sütunlar (sıralı)
+        features = preproc["selected_features"]
+        task = st.session_state.task
         st.write(f"**Hedef:** {st.session_state.target} | **Model:** {st.session_state.best_name.upper()}")
         input_data = {}
         cols = st.columns(2)
@@ -359,7 +409,6 @@ with tab5:
                 input_data[col] = cols[i%2].number_input(col, value=float(mean), min_value=float(mn), max_value=float(mx), key=f"pred_{col}")
 
         if st.button("Tahmin Et"):
-            # Değerleri aynı sırayla diziye çevir
             row = []
             for col in features:
                 val = input_data[col]
@@ -367,23 +416,33 @@ with tab5:
                     freq_dict = preproc["encoders"][col]
                     val = freq_dict.get(str(val), 0)
                 row.append(float(val))
-            X_new = pd.DataFrame([row], columns=features)  # sırayı korur
-            X_new = X_new.apply(safe_convert_to_numeric)
-            X_scaled = preproc["scaler"].transform(X_new)   # scaler sadece bu sütunlarla eğitildi, hatasız çalışır
+            X_new = pd.DataFrame([row], columns=features).apply(safe_convert_to_numeric)
+            X_scaled = preproc["scaler"].transform(X_new)
             model = st.session_state.best_model
-            task = st.session_state.task
+
             if task == "classification":
                 pred = model.predict(X_scaled)[0]
                 proba = model.predict_proba(X_scaled)[0]
-                if preproc["target_encoder"]:
+
+                # Etiket çözme (director gibi isimleri geri getir)
+                if preproc.get("target_encoder") is not None:
                     pred_label = preproc["target_encoder"].inverse_transform([pred])[0]
                     labels = list(preproc["target_encoder"].classes_)
+                elif hasattr(model, "classes_"):
+                    labels = model.classes_
+                    pred_label = labels[pred]
                 else:
                     pred_label = pred
-                    labels = model.classes_
+                    labels = [str(i) for i in range(len(proba))]
+
                 st.success(f"🎯 Tahmin: **{pred_label}**")
                 prob_df = pd.DataFrame({"Sınıf": labels, "Olasılık": proba})
                 st.bar_chart(prob_df.set_index("Sınıf"))
             else:
                 pred = model.predict(X_scaled)[0]
                 st.success(f"🎯 Tahmin: **{pred:.4f}**")
+
+        if st.button("🔄 Başa Dön"):
+            st.session_state.step = 1
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
