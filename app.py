@@ -161,27 +161,29 @@ if st.session_state.df is not None:
         else:
             col_left, col_right = st.columns([1, 3])
             with col_left:
-                chart_type = st.selectbox("Grafik Tipi", 
-                                        ["Çubuk","Çizgi","Dağılım (Scatter)","Pasta","Histogram","Kutu","Alan","Isı Haritası"])
+                chart_type = st.selectbox("Grafik Tipi",
+                                          ["Çubuk","Çizgi","Dağılım (Scatter)","Pasta","Histogram","Kutu","Alan","Isı Haritası"])
                 x_col = st.selectbox("X Ekseni", all_cols)
                 y_col = st.selectbox("Y Ekseni (sayısal)", numeric_cols)
                 color_col = st.selectbox("Renklendir (opsiyonel)", ["Yok"] + all_cols)
                 size_col = st.selectbox("Büyüklük (Scatter için)", ["Yok"] + numeric_cols)
                 facet_col = st.selectbox("Gruplara Ayır (Facet)", ["Yok"] + all_cols)
-                
-                # Filtreler
+
+                # Filtreler (hata düzeltildi)
                 st.subheader("Filtreler")
                 filter_conditions = []
                 for col in all_cols:
                     if st.checkbox(f"Filtrele: {col}", key=f"filter_{col}"):
-                        if df[col].dtype == object or df[col].nunique() < 30:
-                            selected = st.multiselect(f"{col} değerleri", df[col].unique(), key=f"mf_{col}")
-                            if selected:
-                                filter_conditions.append((col, selected))
-                        else:
+                        # Sayısal sütun mu?
+                        if pd.api.types.is_numeric_dtype(df[col]):
                             min_v, max_v = float(df[col].min()), float(df[col].max())
                             range_vals = st.slider(f"{col} aralığı", min_v, max_v, (min_v, max_v), key=f"rg_{col}")
                             filter_conditions.append((col, range_vals))
+                        else:
+                            # Kategorik sütun – multiselect
+                            selected = st.multiselect(f"{col} değerleri", df[col].dropna().unique(), key=f"mf_{col}")
+                            if selected:
+                                filter_conditions.append((col, selected))
 
             with col_right:
                 plot_df = df.copy()
