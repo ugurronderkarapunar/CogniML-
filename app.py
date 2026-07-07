@@ -29,24 +29,19 @@ for key, default in {
 
 # ========== GELİŞMİŞ VERİ TEMİZLİK FONKSİYONLARI ==========
 def is_numeric_column(series):
-    """Sütunun sayısal olup olmadığını anlamak için örnek kontrolü yapar."""
     sample = series.dropna().head(10).astype(str).str.strip()
-    # %, $, €, boşluk, virgül içerebilir ama harf içermemeli
     return sample.str.contains(r'^-?[\d.,%\s€$]+$').all()
 
 def clean_numeric_column(series):
-    """Sayısal görünümlü sütunu temizleyip float'a çevirir."""
     return series.astype(str).str.replace('%','').str.replace('$','').str.replace('€','').str.replace(',','').str.strip()
 
 def safe_convert_to_numeric(series):
-    """Herhangi bir seriyi güvenli float'a çevirir, başarısız olanları 0 yapar."""
     return pd.to_numeric(series, errors='coerce').fillna(0)
 
 def extract_date_features(df, col):
-    """Tarih sütunundan yıl, ay, gün, haftanın günü gibi özellikler çıkarır."""
     try:
         dt = pd.to_datetime(df[col], errors='coerce')
-        if dt.notna().sum() > len(df) * 0.7:  # %70'ten fazlası tarihse
+        if dt.notna().sum() > len(df) * 0.7:
             df[col+'_year'] = dt.dt.year
             df[col+'_month'] = dt.dt.month
             df[col+'_day'] = dt.dt.day
@@ -77,31 +72,28 @@ def preprocess_data(df, target, task):
     df.drop_duplicates(inplace=True)
     df.dropna(axis=1, how='all', inplace=True)
 
-    # 1. Sütun tiplerini akıllıca belirle
     features = [c for c in df.columns if c != target]
-    original_num = df[features].select_dtypes(include=np.number).columns.tolist()
     original_obj = df[features].select_dtypes(include="object").columns.tolist()
 
-    # 2. Obje sütunlarını tara, sayısal görünümlü olanları temizle ve float yap
+    # 1. Obje sütunlarını tara, sayısal görünümlü olanları temizle
     for col in original_obj:
         if is_numeric_column(df[col]):
             df[col] = clean_numeric_column(df[col])
             df[col] = safe_convert_to_numeric(df[col])
         elif df[col].dropna().nunique() < 50:
-            # Düşük kardinaliteli kategorikleri encode edebiliriz
-            pass  # az sonra frekans kodlama yapılacak
+            pass  # kategorik olarak kalacak, frekans kodlama yapılacak
         else:
-            # Yüksek kardinaliteli, frekans kodlama yapılacak
-            pass
+            pass  # yüksek kardinalite, frekans kodlanacak
 
-    # 3. Tarih sütunlarını yakala ve özellik çıkar
-    for col in features[:]:  # kopya üzerinde dön, çünkü sütun eklenebilir
+    # 2. Tarih sütunlarını yakala ve özellik çıkar
+    for col in features[:]:
         if col in df.columns and df[col].dtype == object:
             extract_date_features(df, col)
 
-    # 4. Sayısal sütunlar (temizlenmiş obje kökenliler dahil)
-    num_cols = df[features].select_dtypes(include=np.number).columns.tolist()
-    cat_cols = df[features].select_dtypes(include="object").columns.tolist()
+    # 3. Güncel sayısal ve kategorik sütun listeleri
+    current_features = [c for c in features if c in df.columns]
+    num_cols = df[current_features].select_dtypes(include=np.number).columns.tolist()
+    cat_cols = df[current_features].select_dtypes(include="object").columns.tolist()
 
     # Outlier clipping
     if num_cols:
@@ -131,10 +123,9 @@ def preprocess_data(df, target, task):
         encoders[col] = freq.to_dict()
         cat_options[col] = list(freq.index)
 
-    # Son güvenlik: tüm feature'ları sayısala zorla
-    for col in features:
-        if col in df.columns:
-            df[col] = safe_convert_to_numeric(df[col])
+    # 4. Tüm feature'ları sayısala zorla (güvenlik)
+    for col in current_features:
+        df[col] = safe_convert_to_numeric(df[col])
 
     # Hedef değişken
     y = df[target].copy()
@@ -146,35 +137,36 @@ def preprocess_data(df, target, task):
     else:
         y = safe_convert_to_numeric(y)
 
-    X = df[[c for c in features if c in df.columns]]
-    # Boş sütunları sil
+    X = df[current_features]
     X = X.dropna(axis=1, how='all')
-    features = X.columns.tolist()
+    current_features = X.columns.tolist()
+
+    # Özellik önemi (geçici scaler ile)
+    temp_scaler = StandardScaler()
+    X_temp = temp_scaler.fit_transform(X)
+    rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1) if task=="classification" else RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
+    rf.fit(X_temp, y)
+    imp = pd.Series(rf.feature_importances_, index=current_features).sort_values(ascending=False)
+    top_features = imp.head(15).index.tolist()
+
+    # === SADECE SEÇİLİ ÖZELLİKLERLE YENİ SCALER VE X ===
+    X_selected = X[top_features]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_selected)
 
     num_stats = {}
-    for col in features:
-        num_stats[col] = (float(X[col].min()), float(X[col].max()), float(X[col].mean()))
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    # Özellik önemi (ilk 15)
-    rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1) if task=="classification" else RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
-    rf.fit(X_scaled, y)
-    imp = pd.Series(rf.feature_importances_, index=features).sort_values(ascending=False)
-    top_features = imp.head(15).index.tolist()
+    for col in top_features:
+        num_stats[col] = (float(X_selected[col].min()), float(X_selected[col].max()), float(X_selected[col].mean()))
 
     preproc = {
         "selected_features": top_features,
         "encoders": encoders,
         "cat_options": cat_options,
         "num_stats": num_stats,
-        "scaler": scaler,
-        "target_encoder": target_encoder,
-        "feature_names": features   # tüm feature listesini sakla
+        "scaler": scaler,          # sadece seçili sütunlarla eğitilmiş scaler
+        "target_encoder": target_encoder
     }
-    selected_indices = [features.index(f) for f in top_features]
-    return X_scaled[:, selected_indices], y, preproc
+    return X_scaled, y, preproc
 
 @st.cache_data
 def train_models(X, y, task, model_codes):
@@ -354,7 +346,7 @@ with tab5:
         st.warning("Önce model eğitin.")
     else:
         preproc = st.session_state.preproc
-        features = preproc["selected_features"]
+        features = preproc["selected_features"]  # seçili sütunlar (sıralı)
         st.write(f"**Hedef:** {st.session_state.target} | **Model:** {st.session_state.best_name.upper()}")
         input_data = {}
         cols = st.columns(2)
@@ -367,16 +359,17 @@ with tab5:
                 input_data[col] = cols[i%2].number_input(col, value=float(mean), min_value=float(mn), max_value=float(mx), key=f"pred_{col}")
 
         if st.button("Tahmin Et"):
-            row = {}
+            # Değerleri aynı sırayla diziye çevir
+            row = []
             for col in features:
                 val = input_data[col]
                 if col in preproc["encoders"]:
                     freq_dict = preproc["encoders"][col]
                     val = freq_dict.get(str(val), 0)
-                row[col] = float(val)
-            X_new = pd.DataFrame([row])[features]
+                row.append(float(val))
+            X_new = pd.DataFrame([row], columns=features)  # sırayı korur
             X_new = X_new.apply(safe_convert_to_numeric)
-            X_scaled = preproc["scaler"].transform(X_new)
+            X_scaled = preproc["scaler"].transform(X_new)   # scaler sadece bu sütunlarla eğitildi, hatasız çalışır
             model = st.session_state.best_model
             task = st.session_state.task
             if task == "classification":
