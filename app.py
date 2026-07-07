@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
@@ -12,17 +13,12 @@ from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
 import openai
 
-
-# Sayfa ayarları
 st.set_page_config(page_title="CogniML", layout="wide")
-st.markdown("""
-<style>
+st.markdown("""<style>
     .main { background-color: #0f1117; color: #c9d1e0; }
     .stButton>button { background-color: #4f8ef7; color: white; font-weight: bold; }
-</style>
-""", unsafe_allow_html=True)
+</style>""", unsafe_allow_html=True)
 
-# Session state başlatma
 for key, default in {
     "df_raw": None, "target": None, "task": None,
     "selected_models": [], "preproc": {}, "results": [],
@@ -31,14 +27,42 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ========== Yardımcı Fonksiyonlar ==========
+# ========== GELİŞMİŞ VERİ TEMİZLİK FONKSİYONLARI ==========
+def is_numeric_column(series):
+    """Sütunun sayısal olup olmadığını anlamak için örnek kontrolü yapar."""
+    sample = series.dropna().head(10).astype(str).str.strip()
+    # %, $, €, boşluk, virgül içerebilir ama harf içermemeli
+    return sample.str.contains(r'^-?[\d.,%\s€$]+$').all()
+
+def clean_numeric_column(series):
+    """Sayısal görünümlü sütunu temizleyip float'a çevirir."""
+    return series.astype(str).str.replace('%','').str.replace('$','').str.replace('€','').str.replace(',','').str.strip()
+
+def safe_convert_to_numeric(series):
+    """Herhangi bir seriyi güvenli float'a çevirir, başarısız olanları 0 yapar."""
+    return pd.to_numeric(series, errors='coerce').fillna(0)
+
+def extract_date_features(df, col):
+    """Tarih sütunundan yıl, ay, gün, haftanın günü gibi özellikler çıkarır."""
+    try:
+        dt = pd.to_datetime(df[col], errors='coerce')
+        if dt.notna().sum() > len(df) * 0.7:  # %70'ten fazlası tarihse
+            df[col+'_year'] = dt.dt.year
+            df[col+'_month'] = dt.dt.month
+            df[col+'_day'] = dt.dt.day
+            df[col+'_dayofweek'] = dt.dt.dayofweek
+            df.drop(columns=[col], inplace=True)
+            return True
+    except:
+        pass
+    return False
+
 def generate_profile(df, target):
     num = df.select_dtypes(include=np.number)
     cat = df.select_dtypes(include='object')
     n_rows, n_cols = df.shape
     return {
-        "Satır": n_rows,
-        "Sütun": n_cols,
+        "Satır": n_rows, "Sütun": n_cols,
         "Sayısal Sütun": len(num.columns),
         "Kategorik Sütun": len(cat.columns),
         "Hedef Benzersiz Değer": df[target].nunique(),
@@ -53,7 +77,29 @@ def preprocess_data(df, target, task):
     df.drop_duplicates(inplace=True)
     df.dropna(axis=1, how='all', inplace=True)
 
+    # 1. Sütun tiplerini akıllıca belirle
     features = [c for c in df.columns if c != target]
+    original_num = df[features].select_dtypes(include=np.number).columns.tolist()
+    original_obj = df[features].select_dtypes(include="object").columns.tolist()
+
+    # 2. Obje sütunlarını tara, sayısal görünümlü olanları temizle ve float yap
+    for col in original_obj:
+        if is_numeric_column(df[col]):
+            df[col] = clean_numeric_column(df[col])
+            df[col] = safe_convert_to_numeric(df[col])
+        elif df[col].dropna().nunique() < 50:
+            # Düşük kardinaliteli kategorikleri encode edebiliriz
+            pass  # az sonra frekans kodlama yapılacak
+        else:
+            # Yüksek kardinaliteli, frekans kodlama yapılacak
+            pass
+
+    # 3. Tarih sütunlarını yakala ve özellik çıkar
+    for col in features[:]:  # kopya üzerinde dön, çünkü sütun eklenebilir
+        if col in df.columns and df[col].dtype == object:
+            extract_date_features(df, col)
+
+    # 4. Sayısal sütunlar (temizlenmiş obje kökenliler dahil)
     num_cols = df[features].select_dtypes(include=np.number).columns.tolist()
     cat_cols = df[features].select_dtypes(include="object").columns.tolist()
 
@@ -64,7 +110,7 @@ def preprocess_data(df, target, task):
         IQR = Q3 - Q1
         df[num_cols] = df[num_cols].clip(lower=Q1-1.5*IQR, upper=Q3+1.5*IQR, axis=1)
 
-    # Skewness log1p
+    # Çarpıklık düzeltme
     for col in num_cols:
         if df[col].min() > 0 and abs(df[col].skew()) > 1:
             df[col] = np.log1p(df[col])
@@ -75,7 +121,7 @@ def preprocess_data(df, target, task):
     if cat_cols:
         df[cat_cols] = SimpleImputer(strategy="constant", fill_value="missing").fit_transform(df[cat_cols])
 
-    # Frekans kodlama
+    # Kategorikleri frekans kodla
     encoders = {}
     cat_options = {}
     for col in cat_cols:
@@ -85,14 +131,12 @@ def preprocess_data(df, target, task):
         encoders[col] = freq.to_dict()
         cat_options[col] = list(freq.index)
 
-    # Tüm feature'ları sayısala zorla
+    # Son güvenlik: tüm feature'ları sayısala zorla
     for col in features:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        if col in df.columns:
+            df[col] = safe_convert_to_numeric(df[col])
 
-    num_stats = {}
-    for col in features:
-        num_stats[col] = (float(df[col].min()), float(df[col].max()), float(df[col].mean()))
-
+    # Hedef değişken
     y = df[target].copy()
     target_encoder = None
     if task == "classification":
@@ -100,13 +144,21 @@ def preprocess_data(df, target, task):
         y = pd.Series(le.fit_transform(y), name=target)
         target_encoder = le
     else:
-        y = y.astype(float)
+        y = safe_convert_to_numeric(y)
 
-    X = df[features]
+    X = df[[c for c in features if c in df.columns]]
+    # Boş sütunları sil
+    X = X.dropna(axis=1, how='all')
+    features = X.columns.tolist()
+
+    num_stats = {}
+    for col in features:
+        num_stats[col] = (float(X[col].min()), float(X[col].max()), float(X[col].mean()))
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Özellik önemi
+    # Özellik önemi (ilk 15)
     rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1) if task=="classification" else RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
     rf.fit(X_scaled, y)
     imp = pd.Series(rf.feature_importances_, index=features).sort_values(ascending=False)
@@ -118,9 +170,9 @@ def preprocess_data(df, target, task):
         "cat_options": cat_options,
         "num_stats": num_stats,
         "scaler": scaler,
-        "target_encoder": target_encoder
+        "target_encoder": target_encoder,
+        "feature_names": features   # tüm feature listesini sakla
     }
-    # Sadece seçili özellikleri döndür
     selected_indices = [features.index(f) for f in top_features]
     return X_scaled[:, selected_indices], y, preproc
 
@@ -164,8 +216,7 @@ def train_models(X, y, task, model_codes):
     scoring = 'roc_auc_ovr_weighted' if task=="classification" else 'r2'
 
     for code in model_codes:
-        if code not in grids:
-            continue
+        if code not in grids: continue
         model, param_dist = grids[code]
         search = RandomizedSearchCV(model, param_dist, n_iter=4, cv=3, scoring=scoring,
                                     random_state=42, n_jobs=-1, verbose=0)
@@ -186,7 +237,6 @@ def train_models(X, y, task, model_codes):
             results.append({"Model": code.upper(), "Test R²": round(r2,4), "MAE": round(mae,4)})
             if r2 > best_score:
                 best_score, best_model, best_name = r2, best, code
-
     return results, best_name, best_model
 
 def generate_report(results, best_name, task, api_key=None):
@@ -218,7 +268,6 @@ def generate_report(results, best_name, task, api_key=None):
 
 # ========== ARAYÜZ ==========
 st.title("🧠 CogniML – The Cognitive Data Scientist")
-
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📂 Veri Yükle", "🔍 Profil", "🤖 Eğitim", "📊 Sonuçlar", "🔮 Tahmin"
 ])
@@ -273,10 +322,13 @@ with tab3:
         selected_names = st.multiselect("Modelleri seçin", list(models.keys()), default=["Random Forest","XGBoost"])
         if st.button("🚀 Modelleri Eğit"):
             model_codes = [models[n] for n in selected_names]
-            st.session_state.selected_models = model_codes
             with st.spinner("Veri işleniyor..."):
-                X, y, preproc = preprocess_data(st.session_state.df_raw, st.session_state.target, st.session_state.task)
-                st.session_state.preproc = preproc
+                try:
+                    X, y, preproc = preprocess_data(st.session_state.df_raw, st.session_state.target, st.session_state.task)
+                    st.session_state.preproc = preproc
+                except Exception as e:
+                    st.error(f"Veri işleme hatası: {e}")
+                    st.stop()
             with st.spinner("Modeller eğitiliyor..."):
                 results, best_name, best_model = train_models(X, y, st.session_state.task, model_codes)
                 st.session_state.results = results
@@ -312,7 +364,7 @@ with tab5:
                 input_data[col] = cols[i%2].selectbox(col, opts, key=f"pred_{col}")
             else:
                 mn, mx, mean = preproc["num_stats"].get(col, (0,100,50))
-                input_data[col] = cols[i%2].number_input(col, value=float(mean), min_value=mn, max_value=mx, key=f"pred_{col}")
+                input_data[col] = cols[i%2].number_input(col, value=float(mean), min_value=float(mn), max_value=float(mx), key=f"pred_{col}")
 
         if st.button("Tahmin Et"):
             row = {}
@@ -323,7 +375,7 @@ with tab5:
                     val = freq_dict.get(str(val), 0)
                 row[col] = float(val)
             X_new = pd.DataFrame([row])[features]
-            X_new = X_new.apply(pd.to_numeric, errors='coerce').fillna(0)
+            X_new = X_new.apply(safe_convert_to_numeric)
             X_scaled = preproc["scaler"].transform(X_new)
             model = st.session_state.best_model
             task = st.session_state.task
