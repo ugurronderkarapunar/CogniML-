@@ -9,7 +9,6 @@ st.markdown("""
 <style>
     .main { background-color: #0f1117; color: #c9d1e0; }
     .stButton>button { background-color: #4f8ef7; color: white; font-weight: bold; }
-    .section { border: 1px solid #4f8ef7; border-radius: 8px; padding: 20px; margin: 10px 0; }
     .insight-box { background: #1a1d27; padding: 15px; border-left: 4px solid #4ff7a0; border-radius: 4px; margin: 10px 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -47,16 +46,13 @@ def extract_dates(df, col):
 
 def generate_auto_insights(df):
     insights = []
-    # Eksik veri
     missing = df.isnull().sum()
     missing_cols = missing[missing > 0]
     if not missing_cols.empty:
         insights.append(f"⚠️ Eksik değer içeren {len(missing_cols)} sütun var: {', '.join(missing_cols.index[:5])}")
-    # Tekrar eden satır
     dup = df.duplicated().sum()
     if dup > 0:
         insights.append(f"🔄 {dup} tekrar eden satır bulunuyor.")
-    # Aykırı değerler (IQR)
     num_cols = df.select_dtypes(include=np.number).columns
     outlier_cols = []
     for col in num_cols:
@@ -66,14 +62,12 @@ def generate_auto_insights(df):
             outlier_cols.append(col)
     if outlier_cols:
         insights.append(f"📈 Aykırı değerler barındıran sütunlar: {', '.join(outlier_cols[:5])}")
-    # Çarpıklık
     skewed = []
     for col in num_cols:
         if abs(df[col].skew()) > 1:
             skewed.append(col)
     if skewed:
         insights.append(f"📐 Yüksek çarpıklık (>1) gösteren sütunlar: {', '.join(skewed[:5])}")
-    # Korelasyonlar
     if len(num_cols) > 1:
         corr = df[num_cols].corr()
         high_corr = []
@@ -159,59 +153,83 @@ if st.session_state.df is not None:
     # ---------- GÖRSEL KEŞİF ----------
     with tab2:
         st.subheader("📈 Etkileşimli Grafikler (Plotly)")
-        col_left, col_right = st.columns([1, 3])
-        with col_left:
-            chart_type = st.selectbox("Grafik Tipi", ["Çubuk","Çizgi","Dağılım (Scatter)","Pasta","Histogram","Kutu","Alan","Isı Haritası"])
-            x_col = st.selectbox("X Ekseni", df.columns)
-            y_col = st.selectbox("Y Ekseni (sayısal)", df.select_dtypes(include=np.number).columns, index=0)
-            color_col = st.selectbox("Renklendir (opsiyonel)", ["Yok"] + list(df.columns))
-            size_col = st.selectbox("Büyüklük (Scatter için)", ["Yok"] + list(df.select_dtypes(include=np.number).columns))
-            facet_col = st.selectbox("Gruplara Ayır (Facet)", ["Yok"] + list(df.columns))
-            # Filtreler
-            st.subheader("Filtreler")
-            filter_conditions = []
-            for col in df.columns:
-                if st.checkbox(f"Filtrele: {col}", key=f"filter_{col}"):
-                    if df[col].dtype == object or df[col].nunique() < 30:
-                        selected = st.multiselect(f"{col} değerleri", df[col].unique(), key=f"mf_{col}")
-                        if selected:
-                            filter_conditions.append((col, selected))
+        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        all_cols = df.columns.tolist()
+
+        if not numeric_cols:
+            st.warning("Sayısal sütun bulunamadı. Lütfen önce 'Temizlik' sekmesinde veriyi düzeltin.")
+        else:
+            col_left, col_right = st.columns([1, 3])
+            with col_left:
+                chart_type = st.selectbox("Grafik Tipi", 
+                                        ["Çubuk","Çizgi","Dağılım (Scatter)","Pasta","Histogram","Kutu","Alan","Isı Haritası"])
+                x_col = st.selectbox("X Ekseni", all_cols)
+                y_col = st.selectbox("Y Ekseni (sayısal)", numeric_cols)
+                color_col = st.selectbox("Renklendir (opsiyonel)", ["Yok"] + all_cols)
+                size_col = st.selectbox("Büyüklük (Scatter için)", ["Yok"] + numeric_cols)
+                facet_col = st.selectbox("Gruplara Ayır (Facet)", ["Yok"] + all_cols)
+                
+                # Filtreler
+                st.subheader("Filtreler")
+                filter_conditions = []
+                for col in all_cols:
+                    if st.checkbox(f"Filtrele: {col}", key=f"filter_{col}"):
+                        if df[col].dtype == object or df[col].nunique() < 30:
+                            selected = st.multiselect(f"{col} değerleri", df[col].unique(), key=f"mf_{col}")
+                            if selected:
+                                filter_conditions.append((col, selected))
+                        else:
+                            min_v, max_v = float(df[col].min()), float(df[col].max())
+                            range_vals = st.slider(f"{col} aralığı", min_v, max_v, (min_v, max_v), key=f"rg_{col}")
+                            filter_conditions.append((col, range_vals))
+
+            with col_right:
+                plot_df = df.copy()
+                for col, cond in filter_conditions:
+                    if isinstance(cond, list):
+                        plot_df = plot_df[plot_df[col].isin(cond)]
                     else:
-                        min_v, max_v = float(df[col].min()), float(df[col].max())
-                        range_vals = st.slider(f"{col} aralığı", min_v, max_v, (min_v, max_v), key=f"rg_{col}")
-                        filter_conditions.append((col, range_vals))
-        with col_right:
-            plot_df = df.copy()
-            for col, cond in filter_conditions:
-                if isinstance(cond, list):
-                    plot_df = plot_df[plot_df[col].isin(cond)]
+                        plot_df = plot_df[(plot_df[col] >= cond[0]) & (plot_df[col] <= cond[1])]
+
+                if plot_df.empty:
+                    st.warning("Filtreler sonucu veri kalmadı.")
                 else:
-                    plot_df = plot_df[(plot_df[col] >= cond[0]) & (plot_df[col] <= cond[1])]
-            if plot_df.empty:
-                st.warning("Veri yok")
-            else:
-                color = None if color_col == "Yok" else color_col
-                size = None if size_col == "Yok" else size_col
-                facet = None if facet_col == "Yok" else facet_col
-                if chart_type == "Çubuk": fig = px.bar(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
-                elif chart_type == "Çizgi": fig = px.line(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
-                elif chart_type == "Dağılım (Scatter)": fig = px.scatter(plot_df, x=x_col, y=y_col, color=color, size=size, facet_col=facet)
-                elif chart_type == "Pasta": fig = px.pie(plot_df, names=x_col, values=y_col, color=color)
-                elif chart_type == "Histogram": fig = px.histogram(plot_df, x=x_col, color=color, facet_col=facet)
-                elif chart_type == "Kutu": fig = px.box(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
-                elif chart_type == "Alan": fig = px.area(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
-                elif chart_type == "Isı Haritası":
-                    pivot = plot_df.pivot_table(index=x_col, columns=color_col, values=y_col, aggfunc='mean')
-                    fig = px.imshow(pivot, title=f"{y_col} ısı haritası")
-                fig.update_layout(template="plotly_dark", height=600)
-                st.plotly_chart(fig, use_container_width=True)
+                    color = None if color_col == "Yok" else color_col
+                    size = None if size_col == "Yok" else size_col
+                    facet = None if facet_col == "Yok" else facet_col
+
+                    try:
+                        if chart_type == "Çubuk":
+                            fig = px.bar(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                        elif chart_type == "Çizgi":
+                            fig = px.line(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                        elif chart_type == "Dağılım (Scatter)":
+                            fig = px.scatter(plot_df, x=x_col, y=y_col, color=color, size=size, facet_col=facet)
+                        elif chart_type == "Pasta":
+                            fig = px.pie(plot_df, names=x_col, values=y_col, color=color)
+                        elif chart_type == "Histogram":
+                            fig = px.histogram(plot_df, x=x_col, color=color, facet_col=facet)
+                        elif chart_type == "Kutu":
+                            fig = px.box(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                        elif chart_type == "Alan":
+                            fig = px.area(plot_df, x=x_col, y=y_col, color=color, facet_col=facet)
+                        elif chart_type == "Isı Haritası":
+                            if color_col == "Yok":
+                                st.error("Isı haritası için lütfen bir renk sütunu seçin.")
+                                st.stop()
+                            pivot = plot_df.pivot_table(index=x_col, columns=color_col, values=y_col, aggfunc='mean')
+                            fig = px.imshow(pivot, title=f"{y_col} ısı haritası")
+                        fig.update_layout(template="plotly_dark", height=600)
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Grafik oluşturulamadı: {e}")
 
     # ---------- PİVOT & FİLTRE ----------
     with tab3:
         st.subheader("🧩 Pivot Tablo & Gelişmiş Filtre")
-        pivot_index = st.selectbox("Satır", df.columns, key="piv_idx")
-        pivot_cols = st.selectbox("Sütun", ["Yok"] + list(df.columns), key="piv_col")
-        pivot_vals = st.selectbox("Değer", df.select_dtypes(include=np.number).columns, key="piv_val")
+        pivot_index = st.selectbox("Satır", all_cols, key="piv_idx")
+        pivot_cols = st.selectbox("Sütun", ["Yok"] + all_cols, key="piv_col")
+        pivot_vals = st.selectbox("Değer", numeric_cols, key="piv_val")
         pivot_agg = st.selectbox("Fonksiyon", ["mean","sum","count","min","max"], key="piv_agg")
         if st.button("Pivot Tablo Oluştur"):
             if pivot_cols == "Yok":
@@ -238,7 +256,6 @@ if st.session_state.df is not None:
     # ---------- İÇGÖRÜ ----------
     with tab6:
         st.subheader("🧠 Otomatik İçgörü")
-        st.markdown("**Verinizin akıllı analizi:**")
         insights = generate_auto_insights(df)
         if insights:
             for ins in insights:
