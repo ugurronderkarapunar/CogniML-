@@ -10,9 +10,6 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score, r2_score, mean_absolute_error
 from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, callbacks
 import openai
 import matplotlib.pyplot as plt
 
@@ -190,43 +187,6 @@ def train_models(X, y, task, model_codes):
             if r2 > best_score:
                 best_score, best_model, best_name = r2, best, code
 
-    if "dl" in model_codes:
-        n_classes = len(np.unique(y_train)) if task=="classification" else 1
-        input_dim = X_train.shape[1]
-        model = keras.Sequential([
-            layers.Input(shape=(input_dim,)),
-            layers.Dense(128, activation="relu"), layers.Dropout(0.3),
-            layers.Dense(64, activation="relu"), layers.Dropout(0.2),
-        ])
-        if task=="classification":
-            if n_classes==2:
-                model.add(layers.Dense(1, activation="sigmoid"))
-                loss="binary_crossentropy"; metrics=["accuracy"]
-            else:
-                model.add(layers.Dense(n_classes, activation="softmax"))
-                loss="sparse_categorical_crossentropy"; metrics=["accuracy"]
-        else:
-            model.add(layers.Dense(1)); loss="mse"; metrics=["mae"]
-        model.compile(optimizer=keras.optimizers.Adam(0.001), loss=loss, metrics=metrics)
-        early = callbacks.EarlyStopping(patience=5, restore_best_weights=True)
-        model.fit(X_train, y_train, validation_split=0.2, epochs=30, batch_size=32, callbacks=[early], verbose=0)
-        y_pred_prob = model.predict(X_test, verbose=0)
-        if task=="classification":
-            if n_classes==2:
-                auc = roc_auc_score(y_test, y_pred_prob)
-            else:
-                auc = roc_auc_score(y_test, y_pred_prob, multi_class='ovr')
-            results.append({"Model": "DL", "Test AUC": round(auc,4)})
-            if auc > best_score:
-                best_score, best_model, best_name = auc, model, "dl"
-        else:
-            y_pred = y_pred_prob.flatten()
-            r2 = r2_score(y_test, y_pred)
-            mae = mean_absolute_error(y_test, y_pred)
-            results.append({"Model": "DL", "Test R²": round(r2,4), "MAE": round(mae,4)})
-            if r2 > best_score:
-                best_score, best_model, best_name = r2, model, "dl"
-
     return results, best_name, best_model
 
 def generate_report(results, best_name, task, api_key=None):
@@ -308,8 +268,7 @@ with tab3:
             "LightGBM": "lgbm",
             "Gradient Boosting": "gbm",
             "SVM": "svm",
-            "Logistic Regression / Ridge": "linear",
-            "Derin Öğrenme": "dl"
+            "Logistic Regression / Ridge": "linear"
         }
         selected_names = st.multiselect("Modelleri seçin", list(models.keys()), default=["Random Forest","XGBoost"])
         if st.button("🚀 Modelleri Eğit"):
@@ -368,40 +327,18 @@ with tab5:
             X_scaled = preproc["scaler"].transform(X_new)
             model = st.session_state.best_model
             task = st.session_state.task
-            if st.session_state.best_name != "dl":
-                if task == "classification":
-                    pred = model.predict(X_scaled)[0]
-                    proba = model.predict_proba(X_scaled)[0]
-                    if preproc["target_encoder"]:
-                        pred_label = preproc["target_encoder"].inverse_transform([pred])[0]
-                        labels = list(preproc["target_encoder"].classes_)
-                    else:
-                        pred_label = pred
-                        labels = model.classes_
-                    st.success(f"🎯 Tahmin: **{pred_label}**")
-                    prob_df = pd.DataFrame({"Sınıf": labels, "Olasılık": proba})
-                    st.bar_chart(prob_df.set_index("Sınıf"))
+            if task == "classification":
+                pred = model.predict(X_scaled)[0]
+                proba = model.predict_proba(X_scaled)[0]
+                if preproc["target_encoder"]:
+                    pred_label = preproc["target_encoder"].inverse_transform([pred])[0]
+                    labels = list(preproc["target_encoder"].classes_)
                 else:
-                    pred = model.predict(X_scaled)[0]
-                    st.success(f"🎯 Tahmin: **{pred:.4f}**")
+                    pred_label = pred
+                    labels = model.classes_
+                st.success(f"🎯 Tahmin: **{pred_label}**")
+                prob_df = pd.DataFrame({"Sınıf": labels, "Olasılık": proba})
+                st.bar_chart(prob_df.set_index("Sınıf"))
             else:
-                pred_prob = model.predict(X_scaled, verbose=0)
-                if task == "classification":
-                    if pred_prob.shape[1] == 1:
-                        pred = (pred_prob > 0.5).astype(int).flatten()[0]
-                        proba = np.array([1-pred_prob[0][0], pred_prob[0][0]])
-                        labels = [0,1] if preproc["target_encoder"] is None else list(preproc["target_encoder"].classes_)
-                    else:
-                        pred = np.argmax(pred_prob, axis=1)[0]
-                        proba = pred_prob[0]
-                        labels = list(range(len(proba))) if preproc["target_encoder"] is None else list(preproc["target_encoder"].classes_)
-                    if preproc["target_encoder"]:
-                        pred_label = preproc["target_encoder"].inverse_transform([pred])[0]
-                    else:
-                        pred_label = pred
-                    st.success(f"🎯 Tahmin: **{pred_label}**")
-                    prob_df = pd.DataFrame({"Sınıf": labels, "Olasılık": proba})
-                    st.bar_chart(prob_df.set_index("Sınıf"))
-                else:
-                    pred = float(pred_prob.flatten()[0])
-                    st.success(f"🎯 Tahmin: **{pred:.4f}**")
+                pred = model.predict(X_scaled)[0]
+                st.success(f"🎯 Tahmin: **{pred:.4f}**")
